@@ -1,13 +1,3 @@
-*
-!src/**
-!tests/**
-!configs/**
-!*.md
-!requirements.txt
-!main.py
-!concept.txt
-!data/raw/**
-!notebooks/**
 __pycache__/
 *.pyc
 .pytest_cache/

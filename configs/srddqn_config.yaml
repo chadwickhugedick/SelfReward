@@ -1,0 +1,68 @@
+# SRDDQN Configuration
+
+# Environment settings
+environment:
+  initial_capital: 500000  # Initial trading capital
+  transaction_cost: 0.003  # 0.3% transaction cost
+  window_size: 20         # State window size
+  max_steps: 1000         # Maximum steps per episode
+
+# Data settings
+data:
+   tickers: ["DJI", "IXIC", "SP500", "HSI", "FCHI", "KS11"]  # Six stock indices from the paper
+   ticker: "DJI"  # Default ticker for single-index training
+   train_start_date: "2007-01-01"
+   train_end_date: "2020-12-31"
+   test_start_date: "2021-01-01"
+   test_end_date: "2023-12-31"
+   features:
+     - Open
+     - High
+     - Low
+     - Close
+     - Volume
+
+# Model hyperparameters
+model:
+  # Double DQN parameters
+  dqn:
+    learning_rate: 0.0001
+    gamma: 0.99            # Discount factor
+    epsilon_start: 1.0     # Initial exploration rate
+    epsilon_end: 0.01      # Final exploration rate
+    epsilon_decay: 0.995   # Decay rate for epsilon
+    target_update: 200     # Update target network every N steps
+    tau: 0.005             # Soft update coefficient for target network
+    hidden_size: 128       # Hidden layer size
+    num_layers: 2          # Number of hidden layers
+  
+  # Reward Network parameters
+  reward_net:
+    model_type: "TimesNet"  # Options: TimesNet, WFTNet, NLinear
+    learning_rate: 0.0001
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.1
+
+# Training parameters
+training:
+  num_episodes: 20
+  batch_size: 64
+  replay_buffer_size: 10000
+  reward_labels:
+    - "Min-Max"            # Options: Min-Max, Sharpe, Return
+
+# Random seed for reproducibility
+seed: 42
+
+# Additional training parameters
+sync_steps: 1            # Synchronization steps for reward network
+update_steps: 1          # Update steps for reward network
+
+# Evaluation metrics
+evaluation:
+  metrics:
+    - "CR"                 # Cumulative Return
+    - "AR"                 # Annualized Return
+    - "SR"                 # Sharpe Ratio
+    - "MDD"                # Maximum Drawdown
