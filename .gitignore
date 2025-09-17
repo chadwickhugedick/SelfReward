@@ -5,3 +5,7 @@ data/processed/
 models/saved/
 results/
 .kilocodemodes
+data/
+ALIGNMENT_REPORT.md
+DOCS.md
+concept.txt

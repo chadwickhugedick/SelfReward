@@ -32,6 +32,8 @@ class TestTradingEnvironment(unittest.TestCase):
             initial_capital=10000,
             transaction_cost=0.001
         )
+        # Keep expert selection unset in unit tests
+        self.env.expert_selection = None
     
     def test_initialization(self):
         # Test environment initialization
@@ -46,7 +48,7 @@ class TestTradingEnvironment(unittest.TestCase):
     
     def test_reset(self):
         # Test environment reset
-        observation = self.env.reset()
+        observation, info = self.env.reset()
         
         # Check observation shape
         expected_shape = (self.window_size, self.data.shape[1] + 1)  # +1 for position info
@@ -62,12 +64,13 @@ class TestTradingEnvironment(unittest.TestCase):
     
     def test_step_hold(self):
         # Test hold action
-        self.env.reset()
+        observation, info = self.env.reset()
         initial_capital = self.env.capital
         initial_shares = self.env.shares_held
         
         # Take hold action
-        observation, reward, done, info = self.env.step(0)
+        observation, reward, terminated, truncated, info = self.env.step(0)
+        done = bool(terminated or truncated)
         
         # Check that capital and shares remain unchanged
         self.assertEqual(self.env.capital, initial_capital)
@@ -76,11 +79,12 @@ class TestTradingEnvironment(unittest.TestCase):
     
     def test_step_buy(self):
         # Test buy action
-        self.env.reset()
+        observation, info = self.env.reset()
         initial_capital = self.env.capital
         
         # Take buy action
-        observation, reward, done, info = self.env.step(1)
+        observation, reward, terminated, truncated, info = self.env.step(1)
+        done = bool(terminated or truncated)
         
         # Check that shares were bought and capital decreased
         self.assertTrue(self.env.shares_held > 0)
@@ -89,7 +93,7 @@ class TestTradingEnvironment(unittest.TestCase):
     
     def test_step_sell_after_buy(self):
         # Test sell action after buying
-        self.env.reset()
+        observation, info = self.env.reset()
         
         # First buy
         self.env.step(1)
@@ -97,7 +101,8 @@ class TestTradingEnvironment(unittest.TestCase):
         capital_after_buy = self.env.capital
         
         # Then sell
-        observation, reward, done, info = self.env.step(2)
+        observation, reward, terminated, truncated, info = self.env.step(2)
+        done = bool(terminated or truncated)
         
         # Check that shares were sold and capital increased
         self.assertEqual(self.env.shares_held, 0)

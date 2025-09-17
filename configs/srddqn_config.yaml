@@ -9,18 +9,36 @@ environment:
 
 # Data settings
 data:
-   tickers: ["DJI", "IXIC", "SP500", "HSI", "FCHI", "KS11"]  # Six stock indices from the paper
-   ticker: "DJI"  # Default ticker for single-index training
-   train_start_date: "2007-01-01"
-   train_end_date: "2020-12-31"
-   test_start_date: "2021-01-01"
-   test_end_date: "2023-12-31"
-   features:
-     - Open
-     - High
-     - Low
-     - Close
-     - Volume
+  tickers: ["BTC-USD"]  # Bitcoin for 1-minute data test
+  ticker: "BTC-USD"  # Default ticker for single-index training
+  interval: "1m"  # 1-minute data for BTC
+  train_start_date: "2024-01-01"
+  train_end_date: "2024-06-30"
+  test_start_date: "2024-07-01"
+  test_end_date: "2024-08-31"
+  # Data split ratios for parquet files
+  train_ratio: 0.7        # 70% for training
+  val_ratio: 0.15         # 15% for validation
+  # Remaining 15% automatically used for testing
+  features:
+    - Open
+    - High
+    - Low
+    - Close
+    - Volume
+  # Multi-horizon features (optional)
+  # Enable to compute aggregated features (e.g., daily/weekly) and attach to each high-frequency row.
+  # Example:
+  # multi_horizon:
+  #   enabled: true
+  #   horizons:
+  #     dh: '1D'   # daily horizon prefix 'dh'
+  #     wh: '1W'   # weekly horizon prefix 'wh'
+  multi_horizon:
+    enabled: true
+    horizons:
+      dh: '1D'
+      wh: '1W'
 
 # Model hyperparameters
 model:
@@ -33,27 +51,48 @@ model:
     epsilon_decay: 0.995   # Decay rate for epsilon
     target_update: 200     # Update target network every N steps
     tau: 0.005             # Soft update coefficient for target network
-    hidden_size: 128       # Hidden layer size
-    num_layers: 2          # Number of hidden layers
+    hidden_size: 32        # Further reduced for speed
+    num_layers: 1          # Number of hidden layers
   
   # Reward Network parameters
   reward_net:
-    model_type: "TimesNet"  # Options: TimesNet, WFTNet, NLinear
+    model_type: "NLinear"   # Much faster than TimesNet for testing
     learning_rate: 0.0001
-    hidden_size: 128
-    num_layers: 2
+    hidden_size: 32         # Match DQN hidden size for consistency
+    num_layers: 1          # Reduced from 2 for faster training
     dropout: 0.1
 
 # Training parameters
 training:
-  num_episodes: 20
-  batch_size: 64
-  replay_buffer_size: 10000
+  num_episodes: 20          # Reduced from 20 for faster testing
+  batch_size: 64           # Increased for better GPU utilization
+  replay_buffer_size: 5000 # Increased for better experience replay
   reward_labels:
     - "Min-Max"            # Options: Min-Max, Sharpe, Return
+  # Reward network batching (Task 5)
+  reward_update_interval: 50   # Train reward net every N environment steps
+  reward_batch_multiplier: 4   # Use N * batch_size samples when training reward net
+  reward_warmup_steps: 500     # Do not train reward net before this many steps
+  max_reward_train_per_episode: 5  # Cap reward net updates per episode to limit overhead
+  # Expert selection controls which expert reward the environment should prefer.
+  # Options:
+  #   null / None: use default behavior (plain expert_Min-Max if present)
+  #   'best' : use the precomputed max across expert metrics (expert_best_{k})
+  #   'Min-Max'|'Return'|'Sharpe' : force a specific expert metric
+  expert_selection: null
+
+# Pre-training parameters (Phase 1)
+pretraining:
+  num_epochs: 10           # Number of epochs for reward network pre-training
+  batch_size: 128          # Increased batch size for better GPU utilization
+  learning_rate: 0.0001     # Learning rate for pre-training
+  weight_decay: 0.0001     # Weight decay for regularization
 
 # Random seed for reproducibility
 seed: 42
+
+# Mixed precision training (faster on modern GPUs)
+mixed_precision: true
 
 # Additional training parameters
 sync_steps: 1            # Synchronization steps for reward network

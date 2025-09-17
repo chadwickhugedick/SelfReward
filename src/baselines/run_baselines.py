@@ -29,7 +29,7 @@ def run_baseline(agent, env, episodes, render=False):
     rewards_history = []
     
     for episode in range(episodes):
-        state = env.reset()
+        state, info = env.reset()
         done = False
         episode_reward = 0
         
@@ -39,7 +39,8 @@ def run_baseline(agent, env, episodes, render=False):
         
         while not done:
             action = agent.select_action(state, training=False)
-            next_state, reward, done, info = env.step(action)
+            next_state, reward, terminated, truncated, info = env.step(action)
+            done = bool(terminated or truncated)
             
             # Store experience for training (if applicable)
             if hasattr(agent, 'remember'):

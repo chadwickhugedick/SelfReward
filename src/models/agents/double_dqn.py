@@ -57,7 +57,7 @@ class QNetwork(nn.Module):
 
 class ReplayBuffer:
     """
-    Replay buffer for storing and sampling experiences.
+    Optimized replay buffer for storing and sampling experiences efficiently.
     """
     
     def __init__(self, capacity):
@@ -67,24 +67,85 @@ class ReplayBuffer:
         Args:
             capacity (int): Maximum capacity of the buffer
         """
-        self.buffer = deque(maxlen=capacity)
+        self.capacity = capacity
+        self.buffer = []
+        self.position = 0
+        
+        # Pre-allocate arrays for better memory efficiency
+        self._states = None
+        self._actions = None
+        self._rewards = None
+        self._next_states = None
+        self._dones = None
+        self._initialized = False
+        # Extended storage (original, unflattened states & expert reward dicts)
+        self._orig_states = [None] * capacity
+        self._expert_reward_dicts = [None] * capacity
     
-    def add(self, state, action, reward, next_state, done):
+    def _initialize_arrays(self, state_shape):
+        """Initialize pre-allocated arrays based on the first state shape."""
+        # For flattened states, calculate the total size
+        if len(state_shape) > 1:
+            state_size = np.prod(state_shape)
+        else:
+            state_size = state_shape[0] if len(state_shape) > 0 else 1
+            
+        self._states = np.zeros((self.capacity, state_size), dtype=np.float32)
+        self._actions = np.zeros(self.capacity, dtype=np.int32)
+        self._rewards = np.zeros(self.capacity, dtype=np.float32)
+        self._next_states = np.zeros((self.capacity, state_size), dtype=np.float32)
+        self._dones = np.zeros(self.capacity, dtype=bool)
+        self._initialized = True
+    
+    def add(self, state, action, reward, next_state, done, orig_state=None, expert_reward_dict=None):
         """
-        Add an experience to the buffer.
+        Add an experience to the buffer with optimized memory usage.
         
         Args:
             state: Current state
             action: Action taken
-            reward: Reward received
+            reward: Reward received (can be dict or scalar)
             next_state: Next state
             done: Whether the episode is done
         """
-        self.buffer.append((state, action, reward, next_state, done))
+        state = np.array(state, dtype=np.float32)
+        next_state = np.array(next_state, dtype=np.float32)
+        
+        # Initialize arrays on first use
+        if not self._initialized:
+            self._initialize_arrays(state.shape)
+        
+        # Handle different reward formats
+        if isinstance(reward, dict):
+            reward_value = reward.get('Min-Max', 0.0)
+        else:
+            reward_value = float(reward)
+        
+        # Flatten states for storage
+        state_flat = state.flatten()
+        next_state_flat = next_state.flatten()
+        
+        # Store in circular buffer
+        idx = self.position % self.capacity
+        self._states[idx] = state_flat
+        self._actions[idx] = action
+        self._rewards[idx] = reward_value
+        self._next_states[idx] = next_state_flat
+        self._dones[idx] = done
+        if orig_state is not None:
+            self._orig_states[idx] = orig_state
+        if expert_reward_dict is not None:
+            self._expert_reward_dicts[idx] = expert_reward_dict
+        
+        # Keep original format for compatibility
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(None)
+        
+        self.position += 1
     
     def sample(self, batch_size):
         """
-        Sample a batch of experiences from the buffer.
+        Sample a batch of experiences from the buffer efficiently.
         
         Args:
             batch_size (int): Size of the batch to sample
@@ -92,8 +153,59 @@ class ReplayBuffer:
         Returns:
             tuple: Batch of (states, actions, rewards, next_states, dones)
         """
-        experiences = random.sample(self.buffer, min(batch_size, len(self.buffer)))
-        states, actions, rewards, next_states, dones = zip(*experiences)
+        current_size = min(len(self.buffer), self.capacity)
+        if current_size == 0:
+            return [], [], [], [], []
+        
+        # Sample random indices
+        indices = np.random.choice(current_size, min(batch_size, current_size), replace=False)
+        
+        # Return sampled arrays
+        states = self._states[indices]
+        actions = self._actions[indices]
+        rewards = self._rewards[indices]
+        next_states = self._next_states[indices]
+        dones = self._dones[indices]
+        
+        return states, actions, rewards, next_states, dones
+
+    def sample_extended(self, batch_size):
+        """Sample batch including original states & expert reward dicts for SRDDQN reward net training."""
+        states, actions, rewards, next_states, dones = self.sample(batch_size)
+        # Determine indices used by last sample by re-sampling deterministic subset via matching values.
+        # Simpler approach: resample indices directly again.
+        current_size = min(len(self.buffer), self.capacity)
+        if current_size == 0:
+            return [], [], [], [], [], [], []
+        indices = np.random.choice(current_size, min(batch_size, current_size), replace=False)
+        orig_states = [self._orig_states[i] for i in indices]
+        expert_dicts = [self._expert_reward_dicts[i] for i in indices]
+        return (self._states[indices], self._actions[indices], self._rewards[indices],
+                self._next_states[indices], self._dones[indices], orig_states, expert_dicts)
+    
+    def sample_sequential(self, batch_size):
+        """
+        Sample a sequential batch for improved cache efficiency.
+        
+        Args:
+            batch_size (int): Size of the batch to sample
+            
+        Returns:
+            tuple: Sequential batch of experiences
+        """
+        current_size = min(len(self.buffer), self.capacity)
+        if current_size < batch_size:
+            return self.sample(batch_size)
+        
+        # Start from a random position and take sequential samples
+        start_idx = np.random.randint(0, current_size - batch_size + 1)
+        indices = np.arange(start_idx, start_idx + batch_size)
+        
+        states = self._states[indices]
+        actions = self._actions[indices]
+        rewards = self._rewards[indices]
+        next_states = self._next_states[indices]
+        dones = self._dones[indices]
         
         return states, actions, rewards, next_states, dones
     
@@ -104,7 +216,7 @@ class ReplayBuffer:
         Returns:
             int: Current size of the buffer
         """
-        return len(self.buffer)
+        return min(len(self.buffer), self.capacity)
 
 class DoubleDQNAgent:
     """
