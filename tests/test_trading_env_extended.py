@@ -36,10 +36,12 @@ class TestTradingEnvironmentExtended(unittest.TestCase):
             initial_capital=10000,
             transaction_cost=0.001
         )
+        # Keep expert selection unset in unit tests
+        self.env.expert_selection = None
     
     def test_observation_structure(self):
         # Test that the observation has the correct structure
-        observation = self.env.reset()
+        observation, info = self.env.reset()
         
         # Check observation shape and type
         self.assertEqual(observation.shape, (self.window_size, self.data.shape[1] + 1))
@@ -51,10 +53,11 @@ class TestTradingEnvironmentExtended(unittest.TestCase):
     
     def test_reward_calculation(self):
         # Test the reward calculation
-        self.env.reset()
-        
+        observation, info = self.env.reset()
+
         # Take a buy action when prices are rising
-        observation, reward, done, info = self.env.step(1)  # Buy
+        observation, reward, terminated, truncated, info = self.env.step(1)  # Buy
+        done = bool(terminated or truncated)
         
         # Check that reward is calculated and included in info
         self.assertIsInstance(reward, float)
@@ -65,7 +68,7 @@ class TestTradingEnvironmentExtended(unittest.TestCase):
     
     def test_portfolio_value_tracking(self):
         # Test that portfolio values are tracked correctly
-        self.env.reset()
+        observation, info = self.env.reset()
         initial_value = self.env.portfolio_values[0]
         
         # Take a buy action
@@ -82,20 +85,21 @@ class TestTradingEnvironmentExtended(unittest.TestCase):
     
     def test_episode_completion(self):
         # Test that episode completes when reaching the end of data
-        self.env.reset()
+        observation, info = self.env.reset()
         
         # Set current step to near the end
         self.env.current_step = len(self.data) - 2
         
         # Take one more step
-        observation, reward, done, info = self.env.step(0)  # Hold
+        observation, reward, terminated, truncated, info = self.env.step(0)  # Hold
+        done = bool(terminated or truncated)
         
         # Check that episode is done
         self.assertTrue(done)
     
     def test_transaction_costs(self):
         # Test that transaction costs are applied correctly
-        self.env.reset()
+        observation, info = self.env.reset()
         initial_capital = self.env.capital
         
         # Get current price
@@ -124,7 +128,7 @@ class TestTradingEnvironmentExtended(unittest.TestCase):
     
     def test_portfolio_stats_calculation(self):
         # Test portfolio statistics calculation
-        self.env.reset()
+        observation, info = self.env.reset()
         
         # Simulate a trading strategy: buy and hold
         self.env.step(1)  # Buy
@@ -150,7 +154,7 @@ class TestTradingEnvironmentExtended(unittest.TestCase):
     
     def test_render_function(self):
         # Test that render function works without errors
-        self.env.reset()
+        observation, info = self.env.reset()
         try:
             self.env.render()
             render_success = True

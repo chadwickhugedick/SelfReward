@@ -59,3 +59,29 @@ python src/evaluate.py --model_path models/srddqn_model.pth --dataset data/test_
 ## References
 
 This implementation is based on the paper "Self-Rewarding Deep Reinforcement Learning for Financial Trading Strategies".# SelfReward
+
+## Expert Selection
+
+The configuration key `training.expert_selection` controls which precomputed expert reward the environment should prefer when available. Valid values and behavior:
+
+- `null` / `None`: Default. Use the plain `expert_Min-Max` column if present (backwards compatible).
+- `'best'`: Use the precomputed maximum across expert metrics for the configured lookahead/window (column `expert_best_{k}`). This is useful when you want the environment to adopt the strongest expert signal automatically.
+- `'Min-Max'`, `'Return'`, or `'Sharpe'`: Force a specific expert metric to be used as the expert reward.
+
+Examples:
+
+- Prefer the strongest expert automatically:
+
+```yaml
+training:
+	expert_selection: 'best'
+```
+
+- Force the environment to always use the Sharpe-like expert label:
+
+```yaml
+training:
+	expert_selection: 'Sharpe'
+```
+
+If the requested expert column is not present in the processed dataset, the environment will fall back to available precomputed expert columns or to the online (runtime) reward computation.
