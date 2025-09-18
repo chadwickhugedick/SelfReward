@@ -85,13 +85,30 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
     dqn_losses = []
     reward_net_losses = []
     episode_pnls = []
+    episode_realized_pnls = []
     episode_win_rates = []
     episode_total_trades = []
     episode_sharpe_ratios = []
     episode_max_drawdowns = []
     episode_epsilons = []
+    episode_realized_pnls = []
+    # Flattened per-step epsilon values (across all episodes/steps)
+    per_step_epsilons = []
 
     logging.info(f"Starting SRDDQN training for {num_episodes} episodes...")
+
+    # Persistent TensorBoard writer (if enabled)
+    try:
+        tb_enabled = bool(config.get('training', {}).get('tensorboard', False))
+    except Exception:
+        tb_enabled = False
+    tb_writer = None
+    if tb_enabled:
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            tb_writer = SummaryWriter(log_dir=os.path.join('results', 'tb'))
+        except Exception:
+            logging.exception('Failed to create persistent SummaryWriter')
 
     # Support vectorized environments (SyncVectorEnv) with batch stepping
     # Detect gymnasium VectorEnv (has attribute `num_envs`) or our previous SyncVectorEnv
@@ -191,6 +208,7 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
         losing_trades = 0
         last_position = 0
         last_entry_price = 0
+        episode_realized = 0.0
 
         # Episode loop: for vectorized envs we run until all envs are done
         while (not is_vectorized and not done) or (is_vectorized and not all(done)):
@@ -201,12 +219,27 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
                 for env_idx, s in enumerate(state):
                     actions.append(agent.select_action(s, env_idx=env_idx))
 
+                # record current epsilon for each env in the batch (same epsilon shared across envs)
+                try:
+                    cur_eps = agent.dqn_agent.epsilon
+                except Exception:
+                    cur_eps = None
+                if cur_eps is not None:
+                    per_step_epsilons.extend([cur_eps] * num_envs)
+
                 # Gymnasium VectorEnv.step returns (obs, rewards, dones, truncs, infos)
                 next_state, expert_reward_batch, done_batch, truncs, info_batch = train_env.step(actions)
                 # treat either done or trunc as terminal
                 done_batch = [d or t for d, t in zip(done_batch, truncs)]
             else:
                 action = agent.select_action(state)
+                # record epsilon for this single-env step
+                try:
+                    cur_eps = agent.dqn_agent.epsilon
+                except Exception:
+                    cur_eps = None
+                if cur_eps is not None:
+                    per_step_epsilons.append(cur_eps)
                 next_state, expert_reward, terminated, truncated, info = train_env.step(action)
                 done = bool(terminated or truncated)
 
@@ -241,24 +274,44 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
             current_price = main_info.get('current_price', 0.0)
             current_portfolio_value = main_info.get('portfolio_value', initial_portfolio_value)
 
-            # Detect trade execution (only in single-env mode)
+            # Detect trade execution (only in single-env mode) and aggregate realized PnL
             if not is_vectorized:
-                if action == 1 and last_position == 0:  # Buy signal
-                    trades_executed += 1
-                    last_position = 1
-                    last_entry_price = current_price
-                    trade_logs.append(f"Step {steps} | BUY | Price: {current_price:.2f} | Portfolio: {current_portfolio_value:.2f}")
+                if action == 1:
+                    if last_position == 0:  # Buy to open long
+                        trades_executed += 1
+                        last_position = 1
+                        last_entry_price = current_price
+                        trade_logs.append(f"Step {steps} | BUY | Price: {current_price:.2f} | Portfolio: {current_portfolio_value:.2f}")
+                    elif last_position == -1:  # Buy to cover (close short)
+                        trades_executed += 1
+                        last_position = 0
+                        # Short trade PnL: entry - exit
+                        trade_pnl = (last_entry_price - current_price) / last_entry_price if last_entry_price != 0 else 0.0
+                        if trade_pnl > 0:
+                            winning_trades += 1
+                        else:
+                            losing_trades += 1
+                        realized = main_info.get('last_realized_pnl', 0.0)
+                        episode_realized += realized
+                        trade_logs.append(f"Step {steps} | BUY (cover) | Price: {current_price:.2f} | Trade PnL: {trade_pnl:.4f} | Realized: {realized:.4f} | Portfolio: {current_portfolio_value:.2f}")
 
-                elif action == 2 and last_position == 1:  # Sell signal
-                    trades_executed += 1
-                    last_position = 0
-                    # Calculate trade PnL
-                    trade_pnl = (current_price - last_entry_price) / last_entry_price if last_entry_price != 0 else 0.0
-                    if trade_pnl > 0:
-                        winning_trades += 1
-                    else:
-                        losing_trades += 1
-                    trade_logs.append(f"Step {steps} | SELL | Price: {current_price:.2f} | Trade PnL: {trade_pnl:.4f} | Portfolio: {current_portfolio_value:.2f}")
+                elif action == 2:
+                    if last_position == 0:  # Sell to open short
+                        trades_executed += 1
+                        last_position = -1
+                        last_entry_price = current_price
+                        trade_logs.append(f"Step {steps} | SELL (open short) | Price: {current_price:.2f} | Portfolio: {current_portfolio_value:.2f}")
+                    elif last_position == 1:  # Sell to close long
+                        trades_executed += 1
+                        last_position = 0
+                        trade_pnl = (current_price - last_entry_price) / last_entry_price if last_entry_price != 0 else 0.0
+                        if trade_pnl > 0:
+                            winning_trades += 1
+                        else:
+                            losing_trades += 1
+                        realized = main_info.get('last_realized_pnl', 0.0)
+                        episode_realized += realized
+                        trade_logs.append(f"Step {steps} | SELL (close) | Price: {current_price:.2f} | Trade PnL: {trade_pnl:.4f} | Realized: {realized:.4f} | Portfolio: {current_portfolio_value:.2f}")
 
             if not is_vectorized:
                 # Update state for single env
@@ -327,6 +380,7 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
         episode_rewards.append(episode_reward)
         portfolio_values.append(final_portfolio_value)
         episode_pnls.append(episode_pnl)
+        episode_realized_pnls.append(episode_realized)
         episode_win_rates.append(win_rate)
         episode_total_trades.append(trades_executed)
         episode_sharpe_ratios.append(sharpe_ratio)
@@ -343,6 +397,7 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
         logging.info(f"Episode {episode+1}/{num_episodes} | "
                     f"Reward: {episode_reward:.4f} | "
                     f"PnL: {episode_pnl:.4f} | "
+                    f"Realized: {episode_realized:.4f} | "
                     f"Portfolio: {final_portfolio_value:.2f} | "
                     f"Trades: {trades_executed} | "
                     f"Win Rate: {win_rate:.2f} | "
@@ -356,11 +411,67 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
         for log in trade_logs:
             logging.info(log)
 
+        # Write per-episode realized PnL/histogram to persistent writer
+        if tb_writer is not None:
+            try:
+                tb_writer.add_scalar('realized_pnl/episode', float(episode_realized), global_step=episode)
+                try:
+                    import numpy as _np
+                    tb_writer.add_histogram('realized_pnls/history', _np.array(episode_realized_pnls), global_step=episode)
+                except Exception:
+                    pass
+            except Exception:
+                logging.exception('Failed to write realized PnL to persistent SummaryWriter')
+            try:
+                # Additional scalars: cumulative and average realized PnL
+                cum_realized = float(sum(episode_realized_pnls)) if episode_realized_pnls else 0.0
+                avg_realized = float(np.mean(episode_realized_pnls)) if episode_realized_pnls else 0.0
+                tb_writer.add_scalar('realized_pnl/cumulative', cum_realized, global_step=episode)
+                tb_writer.add_scalar('realized_pnl/avg', avg_realized, global_step=episode)
+                # Trades: this episode and cumulative
+                tb_writer.add_scalar('trades/this_episode', int(trades_executed), global_step=episode)
+                tb_writer.add_scalar('trades/cumulative', int(sum(episode_total_trades)), global_step=episode)
+            except Exception:
+                logging.exception('Failed to write additional TensorBoard scalars')
+
     # Save model
     agent.save(model_path)
     logging.info(f"Model saved to {model_path}")
 
     logging.info("Training completed!")
+    # Persist per-step epsilons to results folder
+    try:
+        eps_array = np.array(per_step_epsilons, dtype=np.float32)
+        np.save(os.path.join('results', 'per_step_epsilons.npy'), eps_array)
+        # Also save CSV for quick inspection
+        import csv
+        with open(os.path.join('results', 'per_step_epsilons.csv'), 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['step', 'epsilon'])
+            for i, v in enumerate(eps_array):
+                writer.writerow([i, float(v)])
+
+        # Optionally log to TensorBoard if enabled in config
+        tb_enabled = False
+        try:
+            tb_enabled = bool(config.get('training', {}).get('tensorboard', False))
+        except Exception:
+            tb_enabled = False
+
+        if tb_enabled and tb_writer is not None:
+            try:
+                tb_writer.add_histogram('epsilon/per_step', eps_array, global_step=0)
+                if eps_array.size > 0:
+                    tb_writer.add_scalar('epsilon/mean', float(eps_array.mean()), global_step=0)
+            except Exception:
+                logging.exception('Failed to write TensorBoard summaries for per_step_epsilons')
+            finally:
+                try:
+                    tb_writer.close()
+                except Exception:
+                    logging.exception('Failed to close persistent SummaryWriter')
+    except Exception:
+        logging.exception('Failed to persist per_step_epsilons')
 
     # Return comprehensive training metrics
     return {
@@ -373,7 +484,9 @@ def train_srddqn(agent, train_env, val_env, config, model_path):
         'episode_total_trades': episode_total_trades,
         'episode_sharpe_ratios': episode_sharpe_ratios,
         'episode_max_drawdowns': episode_max_drawdowns,
-        'episode_epsilons': episode_epsilons
+        'episode_epsilons': episode_epsilons,
+        'episode_realized_pnls': episode_realized_pnls,
+        'per_step_epsilons': per_step_epsilons
     }
 
 def main():

@@ -134,6 +134,9 @@ class TradingEnvironment(gym.Env):
         self.capital = self.initial_capital
         self.shares_held = 0
         self.current_position = 0  # -1 short, 0 flat, 1 long
+        self.entry_price = None
+        self.entry_shares = 0
+        self.last_realized_pnl = 0.0
         self.returns = []
         self.portfolio_values = [self.initial_capital]
         self.done = False
@@ -285,13 +288,25 @@ class TradingEnvironment(gym.Env):
             terminated = True
             truncated = False
             obs = self._get_observation()
-            info = {'portfolio_value': self.capital, 'capital': self.capital, 'shares_held': self.shares_held, 'current_price': None, 'reward_dict': {}}
+            info = {
+                'portfolio_value': self.capital,
+                'capital': self.capital,
+                'shares_held': self.shares_held,
+                'current_price': None,
+                'reward_dict': {},
+                'entry_price': getattr(self, 'entry_price', None),
+                'entry_shares': getattr(self, 'entry_shares', 0),
+                'last_realized_pnl': getattr(self, 'last_realized_pnl', 0.0)
+            }
             return obs, 0.0, terminated, truncated, info
 
         current_price = self.data.iloc[self.current_step]['Close']
 
-        # Action semantics: 1 = buy/open long if flat, 2 = sell/close long
+        # Action semantics:
+        #  - action 1 (Buy): open long if flat, close short if currently short
+        #  - action 2 (Sell): open short if flat, close long if currently long
         if action == 1:
+            # Buy: open long when flat, or close an existing short
             if self.current_position == 0:
                 safe_price = max(current_price, 1e-8)
                 max_shares = int(self.capital // (safe_price * (1 + self.transaction_cost)))
@@ -299,14 +314,58 @@ class TradingEnvironment(gym.Env):
                     self.shares_held = max_shares
                     cost = self.shares_held * safe_price * (1 + self.transaction_cost)
                     self.capital = max(0.0, self.capital - cost)
+                    # record long entry
+                    self.entry_price = safe_price
+                    self.entry_shares = self.shares_held
                     self.current_position = 1
-        elif action == 2:
-            if self.current_position == 1:
+            elif self.current_position == -1:
+                # Close short position (buy to cover) -> realize PnL
                 safe_price = max(current_price, 1e-8)
-                proceeds = self.shares_held * safe_price * (1 - self.transaction_cost)
-                self.capital = max(0.0, self.capital + proceeds)
+                # Realized PnL for short: (entry_price - close_price) * shares
+                if self.entry_price is not None and self.entry_shares < 0:
+                    realized = (self.entry_price - safe_price) * (-self.entry_shares)
+                else:
+                    realized = 0.0
+                cover_cost = (-self.shares_held) * safe_price * (1 + self.transaction_cost)
+                # Capital already contains proceeds from opening the short; subtracting cover_cost
+                # yields the correct net capital (no extra addition of realized required)
+                self.capital = max(0.0, self.capital - cover_cost)
+                self.last_realized_pnl = realized
                 self.shares_held = 0
                 self.current_position = 0
+                self.entry_price = None
+                self.entry_shares = 0
+
+        elif action == 2:
+            # Sell: open short when flat, or close an existing long
+            if self.current_position == 0:
+                safe_price = max(current_price, 1e-8)
+                max_shares = int(self.capital // (safe_price * (1 + self.transaction_cost)))
+                if max_shares > 0:
+                    # represent short positions as negative shares_held
+                    self.shares_held = -max_shares
+                    proceeds = (-self.shares_held) * safe_price * (1 - self.transaction_cost)
+                    # when opening a short, record entry and add proceeds
+                    self.capital = max(0.0, self.capital + proceeds)
+                    self.entry_price = safe_price
+                    self.entry_shares = self.shares_held
+                    self.current_position = -1
+            elif self.current_position == 1:
+                safe_price = max(current_price, 1e-8)
+                # Closing long -> realize PnL
+                if self.entry_price is not None and self.entry_shares > 0:
+                    realized = (safe_price - self.entry_price) * self.entry_shares
+                else:
+                    realized = 0.0
+                proceeds = self.shares_held * safe_price * (1 - self.transaction_cost)
+                # Capital after opening was reduced by the initial cost; adding proceeds
+                # returns principal + profit net of commissions (no double-counting)
+                self.capital = max(0.0, self.capital + proceeds)
+                self.last_realized_pnl = realized
+                self.shares_held = 0
+                self.current_position = 0
+                self.entry_price = None
+                self.entry_shares = 0
 
         expert_reward, reward_dict = self._calculate_reward(action)
 
@@ -328,7 +387,10 @@ class TradingEnvironment(gym.Env):
             'capital': self.capital,
             'shares_held': self.shares_held,
             'current_price': current_price,
-            'reward_dict': reward_dict
+            'reward_dict': reward_dict,
+            'entry_price': self.entry_price,
+            'entry_shares': self.entry_shares,
+            'last_realized_pnl': getattr(self, 'last_realized_pnl', 0.0)
         }
 
         return observation, expert_reward, terminated, truncated, info
@@ -571,7 +633,16 @@ class TradingEnvironment(gym.Env):
             terminated = True
             truncated = False
             obs = self._get_observation()
-            info = {'portfolio_value': self.capital, 'capital': self.capital, 'shares_held': self.shares_held, 'current_price': None, 'reward_dict': {}}
+            info = {
+                'portfolio_value': self.capital,
+                'capital': self.capital,
+                'shares_held': self.shares_held,
+                'current_price': None,
+                'reward_dict': {},
+                'entry_price': getattr(self, 'entry_price', None),
+                'entry_shares': getattr(self, 'entry_shares', 0),
+                'last_realized_pnl': getattr(self, 'last_realized_pnl', 0.0)
+            }
             return obs, 0.0, terminated, truncated, info
 
         # Get current price
@@ -579,11 +650,11 @@ class TradingEnvironment(gym.Env):
         
         # Execute the action
         # Action semantics updated to support short positions
-        #  - action 1 (Buy): open long if flat, close short if currently short, otherwise ignore
-        #  - action 2 (Sell): open short if flat, close long if currently long, otherwise ignore
-        if action == 1:  # Buy / open long (no short support)
+        #  - action 1 (Buy): open long if flat, close short if currently short
+        #  - action 2 (Sell): open short if flat, close long if currently long
+        if action == 1:
+            # Buy: open long when flat, or close an existing short
             if self.current_position == 0:
-                # Open long position
                 safe_price = max(current_price, 1e-8)
                 max_shares = int(self.capital // (safe_price * (1 + self.transaction_cost)))
                 if max_shares > 0:
@@ -591,15 +662,49 @@ class TradingEnvironment(gym.Env):
                     cost = self.shares_held * safe_price * (1 + self.transaction_cost)
                     self.capital = max(0.0, self.capital - cost)
                     self.current_position = 1
-
-        elif action == 2:  # Sell / close long (do not open short when flat)
-            if self.current_position == 1:
-                # Close long position
+            elif self.current_position == -1:
+                # Close short position (buy to cover) -> realize PnL
                 safe_price = max(current_price, 1e-8)
-                proceeds = self.shares_held * safe_price * (1 - self.transaction_cost)
-                self.capital = max(0.0, self.capital + proceeds)
+                if self.entry_price is not None and self.entry_shares < 0:
+                    realized = (self.entry_price - safe_price) * (-self.entry_shares)
+                else:
+                    realized = 0.0
+                cover_cost = (-self.shares_held) * safe_price * (1 + self.transaction_cost)
+                self.capital = max(0.0, self.capital - cover_cost + realized)
+                self.last_realized_pnl = realized
                 self.shares_held = 0
                 self.current_position = 0
+                self.entry_price = None
+                self.entry_shares = 0
+
+        elif action == 2:
+            # Sell: open short when flat, or close an existing long
+            if self.current_position == 0:
+                safe_price = max(current_price, 1e-8)
+                max_shares = int(self.capital // (safe_price * (1 + self.transaction_cost)))
+                if max_shares > 0:
+                    # represent short positions as negative shares_held
+                    self.shares_held = -max_shares
+                    proceeds = (-self.shares_held) * safe_price * (1 - self.transaction_cost)
+                    # record short entry
+                    self.capital = max(0.0, self.capital + proceeds)
+                    self.entry_price = safe_price
+                    self.entry_shares = self.shares_held
+                    self.current_position = -1
+            elif self.current_position == 1:
+                safe_price = max(current_price, 1e-8)
+                # Closing long -> realize PnL
+                if self.entry_price is not None and self.entry_shares > 0:
+                    realized = (safe_price - self.entry_price) * self.entry_shares
+                else:
+                    realized = 0.0
+                proceeds = self.shares_held * safe_price * (1 - self.transaction_cost)
+                self.capital = max(0.0, self.capital + proceeds + realized)
+                self.last_realized_pnl = realized
+                self.shares_held = 0
+                self.current_position = 0
+                self.entry_price = None
+                self.entry_shares = 0
         
         # Calculate reward
         expert_reward, reward_dict = self._calculate_reward(action)
@@ -631,7 +736,10 @@ class TradingEnvironment(gym.Env):
             'capital': self.capital,
             'shares_held': self.shares_held,
             'current_price': current_price,
-            'reward_dict': reward_dict
+            'reward_dict': reward_dict,
+            'entry_price': self.entry_price,
+            'entry_shares': self.entry_shares,
+            'last_realized_pnl': getattr(self, 'last_realized_pnl', 0.0)
         }
 
         return observation, expert_reward, terminated, truncated, info
